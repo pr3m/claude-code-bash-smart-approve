@@ -88,8 +88,14 @@ const DEFAULT_CONFIG = {
   // The user already opted in via /plugin install; gating every script call
   // adds friction without security benefit (a malicious plugin is a bigger
   // problem than any allowlist can solve).
+  // Trusted paths for auto-approving direct script invocations. Covers:
+  //   ~/.claude/plugins/  — marketplace-installed plugin scripts
+  //   ~/.claude/          — stable symlinks plugins write to for short paths
+  //                         (e.g. ~/.claude/roam/bin/roam-cli → plugin dir)
+  //   ~/dev/claude-code-  — local development of any claude-code-* plugin
   trustedPathPrefixes: [
     '~/.claude/plugins/',
+    '~/.claude/',
     '~/dev/claude-code-',
   ],
   deniedPatterns: [],
@@ -298,10 +304,19 @@ function basenameOf(arg) {
 }
 
 function isTrustedPath(s, cfg) {
-  if (typeof s !== 'string') return false;
-  if (s[0] !== '/') return false;
+  if (typeof s !== 'string' || s.length === 0) return false;
+  // Expand leading ~ so `~/.claude/roam/bin/roam-cli` matches a prefix like `~/.claude/`.
+  const expanded = expandPath(s);
+  if (expanded[0] !== '/') return false;
+
+  // Follow symlinks if possible. Plugins commonly symlink a stable path
+  // (~/.claude/<plugin>/bin/cli) to their actual install under the plugin
+  // cache — we want BOTH paths to count as trusted.
+  let resolved = expanded;
+  try { resolved = fs.realpathSync(expanded); } catch (_) { /* path may not exist yet */ }
+
   const prefixes = (cfg.trustedPathPrefixes || []).map(expandPath);
-  return prefixes.some((p) => s.startsWith(p));
+  return prefixes.some((p) => expanded.startsWith(p) || resolved.startsWith(p));
 }
 
 function classifyInvocation(inv, cfg) {
