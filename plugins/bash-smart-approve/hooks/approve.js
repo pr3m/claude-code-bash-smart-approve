@@ -83,6 +83,15 @@ const DEFAULT_CONFIG = {
   ],
   allowedCurlDomains: [],
   allowedRmPaths: [],
+  // Paths whose contents are trusted enough to auto-approve direct invocations.
+  // Use case: Claude Code plugins that shell out to their own bundled scripts.
+  // The user already opted in via /plugin install; gating every script call
+  // adds friction without security benefit (a malicious plugin is a bigger
+  // problem than any allowlist can solve).
+  trustedPathPrefixes: [
+    '~/.claude/plugins/',
+    '~/dev/claude-code-',
+  ],
   deniedPatterns: [],
   logFile: path.join(os.homedir(), '.claude', 'bash-smart-approve.log'),
   logDecisions: ['allow', 'ask'],
@@ -288,6 +297,13 @@ function basenameOf(arg) {
   return b;
 }
 
+function isTrustedPath(s, cfg) {
+  if (typeof s !== 'string') return false;
+  if (s[0] !== '/') return false;
+  const prefixes = (cfg.trustedPathPrefixes || []).map(expandPath);
+  return prefixes.some((p) => s.startsWith(p));
+}
+
 function classifyInvocation(inv, cfg) {
   const argv = inv.argvText;
   if (!argv || argv.length === 0) return { ok: true, reason: 'empty' };
@@ -297,7 +313,21 @@ function classifyInvocation(inv, cfg) {
     return { ok: false, reason: `binary name comes from variable/subshell: ${argv[0]}` };
   }
 
+  // Trusted plugin-path invocation: `/Users/.../.claude/plugins/.../bin/x.sh`.
+  // The user opted in via /plugin install — trust their bundled scripts.
+  if (isTrustedPath(argv[0], cfg)) {
+    return { ok: true, reason: `trusted plugin path: ${argv[0]}` };
+  }
+
   const bin = basenameOf(argv[0]);
+
+  // bash/sh/zsh wrapping a trusted plugin path — same trust reasoning.
+  if (['bash', 'sh', 'zsh'].includes(bin) && argv.length >= 2) {
+    const second = inv.argvFlags[1];
+    if (second && !second.hasSubshell && !second.hasParamExp && isTrustedPath(argv[1], cfg)) {
+      return { ok: true, reason: `trusted plugin script invoked via ${bin}: ${argv[1]}` };
+    }
+  }
 
   if (HARD_DENY_BINARIES.has(bin)) {
     return { ok: false, reason: `'${bin}' is a shell/interpreter — never auto-approved` };
