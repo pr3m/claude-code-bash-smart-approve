@@ -19,14 +19,16 @@ Run `shfmt --version` via Bash.
 
 Also confirm `node --version` ≥ 18.
 
-## Step 2 — Locate the plugin
+## Step 2 — Locate the plugin & determine install mode
 
-Resolve the plugin root directory:
-1. If `$CLAUDE_PLUGIN_ROOT` is set → use it (plugin installed via marketplace).
-2. Else, ask the user: "Where did you clone this repo?" Default suggestion: `~/dev/claude-code-bash-smart-approve`.
-3. Verify `hooks/approve.js` exists under that path.
+Resolve the plugin root directory and pick one of two install modes:
 
-## Step 3 — Wire the hook into ~/.claude/settings.json
+- **Marketplace install** — `$CLAUDE_PLUGIN_ROOT` is set (plugin came from `/plugin install`). The plugin's own `hooks/hooks.json` is auto-registered by Claude Code; **skip Step 3 entirely**. Verify `$CLAUDE_PLUGIN_ROOT/hooks/approve.js` exists, then continue at Step 4.
+- **Local / manual install** — `$CLAUDE_PLUGIN_ROOT` is unset. Ask the user: "Where did you clone this repo?" Default suggestion: `~/dev/claude-code-bash-smart-approve`. Verify `hooks/approve.js` exists. Proceed to Step 3 to wire the hook manually.
+
+## Step 3 — Wire the hook into ~/.claude/settings.json (manual install only)
+
+**Skip this step if `$CLAUDE_PLUGIN_ROOT` was set in Step 2** — adding a second hook registration would fire the hook twice per Bash call.
 
 Use the `update-config` skill (or direct Read + Edit) to add this hook to `~/.claude/settings.json`, **merging** with any existing `hooks.PreToolUse` array:
 
@@ -82,7 +84,7 @@ Expected output: JSON with `"permissionDecision":"allow"`. Show it to the user a
 ## Step 7 — Summary
 
 Tell the user:
-- ✅ Hook wired into `~/.claude/settings.json`
+- ✅ Hook registered (marketplace-auto OR wired into `~/.claude/settings.json` — state which)
 - ✅ Config at `<path>`
 - ⚠️ **Restart Claude Code or run `/hooks` once** — the settings watcher only picks up new hooks on reload.
 - Point them at `/bash-smart-approve:status` for anytime health check and `/bash-smart-approve:list` to inspect config.

@@ -4,7 +4,13 @@
  *
  * Reads the hook input JSON on stdin, parses the bash command via shfmt's AST,
  * and auto-approves (permissionDecision: "allow") only if every invoked binary
- * passes the allowlist. Falls through to "ask" on any uncertainty.
+ * passes the allowlist. Otherwise it stays silent and lets Claude Code's
+ * native permission system (settings.json allow/ask/deny) make the call.
+ *
+ * Design principle: this hook is the LAST layer, not the first. It only
+ * upgrades decisions (adds "allow" for complex compound commands the native
+ * allowlist can't express); it never downgrades them (never forces an "ask"
+ * prompt for a command the user has already allowed natively).
  *
  * Cross-platform: Mac, Linux, Windows (requires Node.js + shfmt in PATH).
  */
@@ -31,7 +37,14 @@ function emit(decision, reason) {
   process.exit(0);
 }
 
-const ask = (r) => emit('ask', r);
+// Pass-through: exit without emitting a permissionDecision so Claude Code's
+// native permission system (settings.json allow/ask/deny rules) decides.
+// This is the hook's default posture for anything it can't positively approve.
+function passthrough(_reason) {
+  process.exit(0);
+}
+
+const ask = passthrough; // Back-compat alias — the hook never forces "ask" anymore.
 const allow = (r) => emit('allow', r);
 const deny = (r) => emit('deny', r);
 
@@ -88,25 +101,39 @@ const DEFAULT_CONFIG = {
   // The user already opted in via /plugin install; gating every script call
   // adds friction without security benefit (a malicious plugin is a bigger
   // problem than any allowlist can solve).
-  // Trusted paths for auto-approving direct script invocations. Covers:
-  //   ~/.claude/plugins/  — marketplace-installed plugin scripts
-  //   ~/.claude/          — stable symlinks plugins write to for short paths
-  //                         (e.g. ~/.claude/roam/bin/roam-cli → plugin dir)
-  //   ~/dev/claude-code-  — local development of any claude-code-* plugin
+  // Trusted paths for auto-approving direct script invocations. Covers
+  // marketplace-installed plugin scripts. Symlinks from short paths like
+  // `~/.claude/<plugin>/bin/cli` resolve via realpath back into the plugin
+  // cache, so they match transparently without widening the trust envelope.
+  // If you want to trust a local plugin clone, add its exact directory (with
+  // trailing slash) to `trustedPathPrefixes` in your config — do NOT use
+  // broad prefixes like `~/dev/` or `~/.claude/`, which would trust every
+  // sibling file in those directories.
   trustedPathPrefixes: [
     '~/.claude/plugins/',
-    '~/.claude/',
-    '~/dev/claude-code-',
   ],
   deniedPatterns: [],
   logFile: path.join(os.homedir(), '.claude', 'bash-smart-approve.log'),
   logDecisions: ['allow', 'ask'],
+  // Rotate the log to <logFile>.1 when it reaches this size (bytes). Keeps a
+  // single rotated file; older rotations are overwritten. Set to 0 to disable.
+  maxLogBytes: 10 * 1024 * 1024,
+  // Load project-level config from <cwd>/.claude/bash-smart-approve.json.
+  // Disabled by default: a hostile repo could ship a config that widens the
+  // allowlist. Users who want per-repo config opt in globally via their
+  // user config (`"allowProjectConfig": true`).
+  allowProjectConfig: false,
 };
 
 function expandPath(p) {
   if (typeof p !== 'string') return p;
   if (p === '~') return os.homedir();
   if (p.startsWith('~/') || p.startsWith('~\\')) return path.join(os.homedir(), p.slice(2));
+  // Expand a leading $HOME / ${HOME} so config values like
+  // "$HOME/.claude/bash-smart-approve.log" resolve correctly instead of
+  // silently staying literal and creating a `$HOME/` directory in cwd.
+  if (p.startsWith('$HOME/') || p.startsWith('$HOME\\')) return path.join(os.homedir(), p.slice(6));
+  if (p.startsWith('${HOME}/') || p.startsWith('${HOME}\\')) return path.join(os.homedir(), p.slice(8));
   return p;
 }
 
@@ -139,8 +166,13 @@ function loadConfig() {
     : path.join(os.homedir(), '.claude', 'bash-smart-approve.json');
   mergeConfig(cfg, tryReadJson(userPath));
 
-  const projectPath = path.join(process.cwd(), '.claude', 'bash-smart-approve.json');
-  mergeConfig(cfg, tryReadJson(projectPath));
+  // Project configs are opt-in: a hostile repo could otherwise ship a
+  // .claude/bash-smart-approve.json that widens trust. User must set
+  // `allowProjectConfig: true` in their user config to enable this path.
+  if (cfg.allowProjectConfig) {
+    const projectPath = path.join(process.cwd(), '.claude', 'bash-smart-approve.json');
+    mergeConfig(cfg, tryReadJson(projectPath));
+  }
 
   if (typeof cfg.logFile === 'string') cfg.logFile = expandPath(cfg.logFile);
   cfg.scopeDirectories = (cfg.scopeDirectories || []).map(expandPath);
@@ -315,8 +347,16 @@ function isTrustedPath(s, cfg) {
   let resolved = expanded;
   try { resolved = fs.realpathSync(expanded); } catch (_) { /* path may not exist yet */ }
 
-  const prefixes = (cfg.trustedPathPrefixes || []).map(expandPath);
-  return prefixes.some((p) => expanded.startsWith(p) || resolved.startsWith(p));
+  // Enforce path-boundary match: a prefix only matches if it ends at a `/`
+  // in the target path. This prevents `~/dev/claude-code-` from matching a
+  // sibling directory like `~/dev/claude-code-evil/`. Prefixes without a
+  // trailing slash are normalized to have one.
+  const prefixes = (cfg.trustedPathPrefixes || [])
+    .map(expandPath)
+    .map((p) => (p.endsWith('/') ? p : p + '/'));
+  const expandedDir = expanded.endsWith('/') ? expanded : expanded + '/';
+  const resolvedDir = resolved.endsWith('/') ? resolved : resolved + '/';
+  return prefixes.some((p) => expandedDir.startsWith(p) || resolvedDir.startsWith(p));
 }
 
 function classifyInvocation(inv, cfg) {
@@ -423,6 +463,20 @@ function logDecision(cfg, decision, command, reason) {
   if (!cfg.logFile || !(cfg.logDecisions || []).includes(decision)) return;
   try {
     fs.mkdirSync(path.dirname(cfg.logFile), { recursive: true });
+
+    // Rotate if the current log exceeds maxLogBytes. Keeps exactly one
+    // rotated file (<logFile>.1, overwritten each rotation) so the on-disk
+    // footprint is bounded at roughly 2 × maxLogBytes.
+    const max = typeof cfg.maxLogBytes === 'number' ? cfg.maxLogBytes : 0;
+    if (max > 0) {
+      try {
+        const st = fs.statSync(cfg.logFile);
+        if (st.size >= max) {
+          fs.renameSync(cfg.logFile, cfg.logFile + '.1');
+        }
+      } catch (_) { /* no existing log or rename failed — ignore */ }
+    }
+
     fs.appendFileSync(cfg.logFile, JSON.stringify({
       ts: new Date().toISOString(),
       cwd: process.cwd(),

@@ -6,9 +6,9 @@
 
 Claude Code asks for permission every time it wants to run a terminal command. You can pre-approve simple ones like `git status` or `npm test`, but the moment Claude chains commands together — even totally safe things like `git diff && echo "---" && git log` — you get another prompt. Over a day of coding, that's hundreds of interruptions for commands you'd happily wave through.
 
-This plugin reads what Claude is actually about to run, understands the pieces, and only auto-approves when *every single tool* in the command is one you've pre-approved. Dangerous patterns (shelling out to `bash -c`, piping downloads into shell, `rm -rf` on random paths) are still blocked — so you get fewer interruptions without giving up safety.
+This plugin reads what Claude is actually about to run, understands the pieces, and only auto-approves when *every single tool* in the command is one you've pre-approved. Anything else it stays out of the way — Claude Code's native permission system (your `settings.json` allow / deny / ask rules) still decides.
 
-> ⚠️ **Alpha.** Works on Mac, Linux, and Windows. Designed to fail **closed to "ask"** (the normal permission prompt) on any uncertainty — never silently broadens what you approve.
+> ⚠️ **Alpha.** Works on Mac, Linux, and Windows. The hook is a *last layer*: it only ever upgrades a decision to `allow` for compound commands it fully understands. It never forces a prompt for a command you already allowed natively, and never silently broadens what you approve.
 
 ## The technical version
 
@@ -21,9 +21,9 @@ Claude Code's built-in `Bash(...)` permission rules do literal prefix matching, 
 | `FOO=$(grep ...) curl https://api.github.com/...` | prompt | auto-allow (if `github.com` is listed) |
 | `git diff && cd ../other && git diff` | prompt | auto-allow |
 | `grep x file \| sed y \| jq .` | prompt | auto-allow |
-| `bash -c "rm -rf /"` | prompt | **never auto-approved** (hard-deny) |
-| `curl -L https://x.com/...` | prompt | **never auto-approved** (redirect risk) |
-| `$CMD arg` (variable-indirected) | prompt | **never auto-approved** |
+| `bash -c "rm -rf /"` | prompt | hook declines to approve — native permission system decides |
+| `curl -L https://x.com/...` | prompt | hook declines to approve (redirect risk) |
+| `$CMD arg` (variable-indirected) | prompt | hook declines to approve |
 
 ## Requirements
 
@@ -80,20 +80,25 @@ Copy `config.example.json` to one of:
 
 - `$CLAUDE_PLUGIN_DATA/config.json` — set automatically when installed via marketplace; survives plugin upgrades
 - `~/.claude/bash-smart-approve.json` — user-global fallback
-- `<repo>/.claude/bash-smart-approve.json` — project-scoped, merges on top of user config (commit this to share with teammates)
+- `<repo>/.claude/bash-smart-approve.json` — project-scoped, **off by default**; opt in globally by setting `allowProjectConfig: true` in your user config. Any repo you open would otherwise be able to widen your allowlist.
+
+Config layers merge user → project (when enabled). Scalar fields override; array fields (`allowedBinaries`, `allowedCurlDomains`, `allowedRmPaths`, `trustedPathPrefixes`, `deniedPatterns`) are **unioned** — you can add entries in a later layer but not remove defaults. To shrink the effective allowlist, use `deniedPatterns`.
 
 ### Config schema
 
 | Field | Type | Description |
 |---|---|---|
 | `enabled` | boolean | Master switch. `false` = disable entirely. |
-| `scopeDirectories` | string[] | If non-empty, the hook only acts when `cwd` is inside one of these. Supports `~`. |
+| `scopeDirectories` | string[] | If non-empty, the hook only acts when `cwd` is inside one of these. Supports `~`, `$HOME`. |
 | `allowedBinaries` | string[] | Binaries that may be auto-approved. Supports globs (e.g. `wunda-*`). |
 | `allowedCurlDomains` | string[] | Hosts allowed for `curl` / `wget`. Supports globs (e.g. `*.atlassian.net`). |
 | `allowedRmPaths` | string[] | Paths allowed for `rm` / `rmdir`. Supports `**` (e.g. `/tmp/**`). |
-| `deniedPatterns` | string[] | Regex patterns — matching commands are always sent to the normal prompt. |
-| `logFile` | string | Audit log path. Supports `~`. |
+| `trustedPathPrefixes` | string[] | Directory prefixes whose executables are auto-approved as direct script invocations. Matched at path-segment boundaries — `~/foo/` does not match `~/foo-bar/`. Default: `~/.claude/plugins/` only. |
+| `deniedPatterns` | string[] | Regex patterns — matching commands are pass-through (hook declines to approve). |
+| `logFile` | string | Audit log path. Supports `~`, `$HOME`. |
 | `logDecisions` | string[] | Which decisions to log. Default `["allow", "ask"]`. |
+| `maxLogBytes` | number | Rotate `logFile` → `logFile.1` when it reaches this size. `0` disables rotation. Default 10 MB. |
+| `allowProjectConfig` | boolean | Load `<cwd>/.claude/bash-smart-approve.json`. Off by default. |
 
 ### Hard-denied, unconditionally
 
@@ -115,10 +120,11 @@ These categories exist specifically to bypass allowlist analysis, so the hook wo
 
 ### Security notes
 
-- **`curl`/`wget` with `-L` / `--location`** is always rejected — HTTP redirects can bypass a domain allowlist (301 → attacker.com).
-- **Variable-indirected binary names** (`$CMD arg`) are rejected — the hook can't verify what `$CMD` expands to.
+- **`curl`/`wget` with `-L` / `--location`** is not auto-approved — HTTP redirects can bypass a domain allowlist (301 → attacker.com).
+- **Variable-indirected binary names** (`$CMD arg`) are not auto-approved — the hook can't verify what `$CMD` expands to.
 - **`rm` path arguments are compared literally** — shell glob expansion happens after the hook sees them, so `rm -rf ~/$VAR` fails the allowlist (good).
-- **Settings.json `deny`/`ask` rules always win** over the hook's `allow`. Use your existing deny rules as a hard floor.
+- **Claude Code's `deny` rules in `settings.json` evaluate before a hook `allow`** — a native `deny Bash(rm:*)` still blocks even if the hook would have approved. Use native deny rules as your hard floor.
+- **`git` and `npm` are effectively interpreters**. `git -c core.pager="sh -c …"`, `git -c alias.x="!…"`, and `npm run <any-script>` execute arbitrary code despite the binary name looking safe. If that matters, add `deniedPatterns` entries like `^git\\s+-c\\s+(core\\.editor|core\\.pager|alias\\.|core\\.sshCommand)` or `^npm\\s+run(\\s|$)`.
 
 ## Kill switch
 
@@ -147,19 +153,19 @@ All are invocable by slash command *and* via natural language.
 ## How it decides
 
 1. Read hook input from stdin → extract `tool_input.command`.
-2. Check `BASH_SMART_APPROVE_DISABLE` env var and `enabled` config flag → ask if off.
-3. Check `cwd` against `scopeDirectories` → ask if outside.
-4. Run `shfmt -tojson` → get shell AST. Parse failure → ask.
+2. Check `BASH_SMART_APPROVE_DISABLE` env var and `enabled` config flag → pass through if off.
+3. Check `cwd` against `scopeDirectories` → pass through if outside.
+4. Run `shfmt -tojson` → get shell AST. Parse failure → pass through.
 5. Walk AST, collect every `CallExpr` (command invocation), descending into `$(...)`, `<(...)`, backticks, pipes, `&&`, `||`, `;`, blocks, subshells.
 6. For each invocation:
-   - Reject if the binary is a shell/interpreter.
+   - Reject (don't approve) if the binary is a shell/interpreter.
    - Reject if it's an interpreter invoked with an inline-exec flag.
    - Reject if the binary name contains variable/subshell expansion.
    - Apply `deniedPatterns` regex.
    - `curl` / `wget` → require explicit http(s) URL, reject `-L`, check host against `allowedCurlDomains`.
    - `rm` / `rmdir` → check every non-flag argument against `allowedRmPaths`.
    - Otherwise → require the binary to match `allowedBinaries`.
-7. All invocations pass → emit `permissionDecision: "allow"`. Any failure → `"ask"` (normal prompt).
+7. All invocations pass → emit `permissionDecision: "allow"`. Any failure → pass through (no decision emitted; native permission system decides).
 
 ## Contributing
 
