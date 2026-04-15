@@ -7,7 +7,7 @@
   "plugins": [
     {
       "name": "bash-smart-approve",
-      "source": "./",
+      "source": "./plugins/bash-smart-approve",
       "description": "AST-based bash command auto-approval for Claude Code",
       "version": "0.1.0"
     }
