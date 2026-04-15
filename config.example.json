@@ -1,0 +1,19 @@
+{
+  "enabled": true,
+  "scopeDirectories": [
+    "~/dev/your-project"
+  ],
+  "allowedBinaries": [
+    "ls", "cat", "grep", "sed", "awk", "jq",
+    "git", "node", "npm", "npx", "pnpm", "yarn", "make",
+    "printf", "echo", "cd", "pwd", "mkdir", "touch"
+  ],
+  "allowedCurlDomains": [
+    "api.github.com",
+    "*.atlassian.net"
+  ],
+  "allowedRmPaths": [],
+  "deniedPatterns": [],
+  "logFile": "~/.claude/bash-smart-approve.log",
+  "logDecisions": ["allow", "ask"]
+}

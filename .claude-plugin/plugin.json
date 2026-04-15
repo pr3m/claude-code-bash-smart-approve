@@ -1,0 +1,13 @@
+{
+  "name": "bash-smart-approve",
+  "version": "0.1.0",
+  "description": "Auto-approves Claude Code Bash commands via AST-based allowlist. Handles pipes, subshells, compound commands, and env-var prefixes that literal Bash(...) prefix rules can't match.",
+  "author": {
+    "name": "Christjan Schumann",
+    "url": "https://github.com/pr3m"
+  },
+  "homepage": "https://github.com/pr3m/claude-code-bash-smart-approve",
+  "repository": "https://github.com/pr3m/claude-code-bash-smart-approve",
+  "license": "MIT",
+  "keywords": ["claude-code", "plugin", "hook", "bash", "permissions", "allowlist", "pretooluse"]
+}
