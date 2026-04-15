@@ -2,9 +2,17 @@
 
 **A Claude Code plugin that auto-approves Bash commands via an AST-based allowlist.**
 
-Claude Code's built-in `Bash(...)` permission rules do literal prefix matching, so compound commands like `FOO=bar curl ...`, `cd /repo && git status`, or `grep x | sed y | jq .` trigger a prompt even when every individual tool is safe. This plugin parses the command with `shfmt` and auto-approves only when *every* invoked binary passes a configurable allowlist — with first-class handling for `curl`/`wget` domains and `rm` paths.
+## The problem, in plain English
+
+Claude Code asks for permission every time it wants to run a terminal command. You can pre-approve simple ones like `git status` or `npm test`, but the moment Claude chains commands together — even totally safe things like `git diff && echo "---" && git log` — you get another prompt. Over a day of coding, that's hundreds of interruptions for commands you'd happily wave through.
+
+This plugin reads what Claude is actually about to run, understands the pieces, and only auto-approves when *every single tool* in the command is one you've pre-approved. Dangerous patterns (shelling out to `bash -c`, piping downloads into shell, `rm -rf` on random paths) are still blocked — so you get fewer interruptions without giving up safety.
 
 > ⚠️ **Alpha.** Works on Mac, Linux, and Windows. Designed to fail **closed to "ask"** (the normal permission prompt) on any uncertainty — never silently broadens what you approve.
+
+## The technical version
+
+Claude Code's built-in `Bash(...)` permission rules do literal prefix matching, so compound commands like `FOO=bar curl ...`, `cd /repo && git status`, or `grep x | sed y | jq .` trigger a prompt even when every individual tool is safe. This plugin parses the command with [`shfmt`](https://github.com/mvdan/sh) into a shell AST, then auto-approves only when every invoked binary passes a configurable allowlist — with first-class handling for `curl` / `wget` domains and `rm` paths, and hard-denies for shell interpreters (`bash`, `sh`, `sudo`, `xargs`, `env`, inline-exec flags like `node -e`, etc.).
 
 ## What it handles
 
